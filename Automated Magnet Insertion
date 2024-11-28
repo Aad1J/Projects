@@ -1,0 +1,237 @@
+/*    Genesis Robotics and Motion Technologies
+ *    Manufacturing Engineering 
+ *    Aaditya Jaiskandar
+ *    Magnet Insertion Machine
+ *    Version 1.0   - Testing motion control of the rotor spindle accuracy and the pneumatic cylinder pushing actuation timing.
+ *                  - Cycle time of 22 magnets is close to 30 sec.
+ *                  - Connected with IndustrialShield TinkerTouch Via Node Red Serial Dashboard
+ */
+
+#include <P1AM.h>
+
+#define stepPin       3
+#define directionPin  4
+#define enablePin     2
+#define capsensorPin  1   // Sensor replaced with inductive sensor 3mm dia.
+#define pushsensorPin 7
+#define blowsensorPin 11
+
+// P1 - 15CDD Channel assignment
+channelLabel cylinderValve = {1,1};
+channelLabel ejectValve = {1,2};
+
+// Initialize P1AM constants and variables
+int stepCount;
+int slot;
+int stepSpruce = 4545;    // Steps per slot on any Spruce rotor (22 magnets 4545,  44 magnets 2272)
+int stepM6 = 4167;        // Steps per slot on any M6C rotor
+int rotateSpeed = 100;    // Pulse interval in Milliseconds
+int magnetSpruce = 5;    // number of magnet to be inserted on to the Spruce cartridge
+int magnetM6    = 24;     // number of magnet to be inserted to the M6 cartrdige 
+int magnetCustom;         // Number of magnet is inputed by the user
+int rotateHoming = 10;    // Pulse interval in MicroSeconds
+
+// Initialize variables and constants for PC-HMI transmission
+String transData;
+char select;
+String textEntry;
+int magnetNumber;  // FOr custom number magnets
+int blnk;
+int capsensorStat;
+int prevsensorStat;
+int capsensorCount = 0;
+int preRotate=1;
+int alignSteps;
+int pushsensorStat;
+int blowsensorStat;
+int oppositeSlot=1;
+
+
+
+void setup(){
+  Serial.begin(115200);
+  while (!P1.init()) {
+    // Check p1000 module connection to the P1AM Controller.  Slot 1 is the P1-TR
+  }
+  pinMode(stepPin, OUTPUT);
+  pinMode(directionPin, OUTPUT);
+  pinMode(enablePin, OUTPUT);
+  pinMode(capsensorPin, INPUT_PULLUP);
+  pinMode(blowsensorPin, INPUT_PULLUP);
+  slot = 0;
+  stepCount = 0;
+}
+
+
+void homing(){
+  preRotate = 1;
+  while (preRotate < 100000){
+    digitalWrite(directionPin, LOW);
+    digitalWrite(stepPin, HIGH);
+    delayMicroseconds(rotateHoming*5);
+    digitalWrite(stepPin, LOW);
+    delayMicroseconds(rotateHoming*5);
+    preRotate++;
+    Serial.println(preRotate);
+  }
+  delay(500);
+  capsensorCount = 0;
+  prevsensorStat = 0;
+  while (capsensorCount < 5){  // looking for 5 slots
+    capsensorStat = digitalRead(capsensorPin);
+    if (prevsensorStat != capsensorStat) {
+      capsensorCount++;
+      prevsensorStat = capsensorStat;
+    }
+    else{
+    }
+    digitalWrite(directionPin, HIGH);
+    digitalWrite(stepPin, HIGH);
+    delayMicroseconds(rotateHoming*100);
+    digitalWrite(stepPin, LOW);
+    delayMicroseconds(rotateHoming*100);
+    Serial.print(capsensorStat);
+    Serial.print("   ");
+    Serial.println(capsensorCount);
+  }
+  delay(500);
+  alignSteps = 0;
+  while (alignSteps < 12820){
+    digitalWrite(directionPin, HIGH); 
+    digitalWrite(enablePin, HIGH);
+    digitalWrite(stepPin, HIGH);
+    delayMicroseconds(rotateHoming);
+    digitalWrite(stepPin, LOW);
+    delayMicroseconds(rotateHoming);
+    alignSteps++;
+    Serial.println(alignSteps);
+  }
+}
+
+
+void loop() {
+  if (Serial.available()){
+    transData = Serial.readString();
+    select = transData.charAt(0);    // Operator select s, or m from HMI to select either spruce or m6c to assemble
+    digitalWrite(enablePin, LOW);
+    switch(select){
+      case 's':
+      delay(1000);
+      digitalWrite(enablePin, HIGH);
+      homing();
+      delay(1000);
+      blowsensorStat = 1;
+      pushsensorStat = 1;
+      while (slot < magnetSpruce){
+        while (pushsensorStat ==1){
+          P1.writeDiscrete(HIGH,cylinderValve);
+          pushsensorStat = digitalRead(pushsensorPin);
+        }
+        delay(100);
+        pushsensorStat = 1;
+        blowsensorStat = 1;
+        while (blowsensorStat == 1){
+          P1.writeDiscrete(LOW,cylinderValve);
+          blowsensorStat = digitalRead(blowsensorPin);
+        }
+        P1.writeDiscrete(HIGH,ejectValve);
+        delay(50);
+        P1.writeDiscrete(LOW, ejectValve);
+        delay(100);
+        while (stepCount < stepSpruce){
+          digitalWrite(directionPin, HIGH);
+          digitalWrite(stepPin, HIGH);
+          delayMicroseconds(rotateSpeed);
+          digitalWrite(stepPin, LOW);
+          delayMicroseconds(rotateSpeed);
+          stepCount++;
+        }
+        stepCount = 0;
+        slot++;
+      }
+      while (!Serial.available());
+      oppositeSlot = 0;
+      while (oppositeSlot < 2272){
+        digitalWrite(directionPin, LOW);
+        digitalWrite(stepPin, HIGH);
+        delayMicroseconds(rotateHoming*5);
+        digitalWrite(stepPin, LOW);
+        delayMicroseconds(rotateHoming*2);
+        oppositeSlot++;
+      }
+      slot = 0;
+      while (slot < magnetSpruce){
+        while (pushsensorStat ==1){
+          P1.writeDiscrete(HIGH,cylinderValve);
+          pushsensorStat = digitalRead(pushsensorPin);
+        }
+        delay(100);
+        pushsensorStat = 1;
+        blowsensorStat = 1;
+        while (blowsensorStat == 1){
+          P1.writeDiscrete(LOW,cylinderValve);
+          blowsensorStat = digitalRead(blowsensorPin);
+        }
+        P1.writeDiscrete(HIGH,ejectValve);
+        delay(50);
+        P1.writeDiscrete(LOW, ejectValve);
+        delay(100);
+        while (stepCount < stepSpruce){
+          digitalWrite(directionPin, LOW);
+          digitalWrite(stepPin, HIGH);
+          delayMicroseconds(rotateSpeed);
+          digitalWrite(stepPin, LOW);
+          delayMicroseconds(rotateSpeed);
+          stepCount++;
+        }
+        stepCount = 0;
+        slot++;
+      }
+      delay(500);
+      digitalWrite(enablePin, LOW);
+      delay(2000);
+      slot = 0;
+      Serial.println("f");
+      break;
+      case 'm':
+      delay(3000);
+      while (slot < magnetM6){
+        delay(200);
+        while (stepCount < stepM6){
+          digitalWrite(directionPin, HIGH);
+          digitalWrite(enablePin, HIGH);
+          digitalWrite(stepPin, HIGH);
+          delayMicroseconds(rotateSpeed);
+          digitalWrite(stepPin, LOW);
+          delayMicroseconds(rotateSpeed);
+          stepCount++;
+        }
+      stepCount = 0;
+      slot++;
+      delay(200);
+      P1.writeDiscrete(HIGH,cylinderValve);
+      delay(300);
+      P1.writeDiscrete(LOW,cylinderValve);
+      delay(200);
+      Serial.println(slot);
+      }
+      delay(2000);
+      slot = 0;
+      Serial.println("f");
+      break;
+      case 'c':
+      textEntry = transData.substring(1);
+      magnetCustom = textEntry.toInt();
+      blnk = 0;
+      while (blnk < magnetCustom) {
+        blnk++;
+        // p = blnk;
+        Serial.println("f");
+        }
+      break;
+    }
+  }
+  digitalWrite(enablePin, LOW);
+}
+Magnet Insertion Machine.txt
+Displaying Magnet Insertion Machine.txt.
