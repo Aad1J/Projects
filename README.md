@@ -15,12 +15,11 @@ This repository showcases a selection of projects that highlight my coding backg
 ### Featured Projects
 
 1. **Used Car Price Prediction**
-   - Analyzed a comprehensive dataset of used car attributes
-   - Developed a predictive model using linear regression
-   - Utilized libraries such as Pandas, NumPy, Scikit-learn, and Matplotlib
-
+   
 2.  **Automated Rotor Potting**
-   - 
+
+3.  **Automated Magnet Insertion**
+   
 
 ### Note on Additional Work
 
