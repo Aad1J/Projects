@@ -1,0 +1,925 @@
+/*  Magnet Adhessive dispensing machine Program V1
+ *  Testing with the scale fixture on the load cell 12-21-2021
+ *  Added function for the measurement
+ *  Added function to check for the size of the rotor to build.
+ *  Aaditya Jaishankar
+ *  Manufacturing Engineering - Genesis Robotics and Motion Technologies
+ *  Production roll off - Feb 10,2022   Stage 1 Dispensing automation
+ *                        Mar 2 ,2022   Stage 2 Automated Resin infusion,  fixed bug on debounce
+*                         Mar 31, 2022  Added barrier to prevent splash to operator during the dispensing process.  Interlocks with dispensing operation of the machine.
+ *                        June 3, 2022  Adjusted the Spruce 25 quantity   from 70 to 90 grams
+ *  
+ */
+
+ 
+
+#include <Wire.h>
+#include <P1AM.h>
+#include "HX711.h"
+#include <LiquidCrystal_I2C.h>
+#include <ArduinoRS485.h>
+#include <ArduinoModbus.h>
+#include <SD.h>
+LiquidCrystal_I2C lcd(0x27, 20, 4);
+
+
+#define upButton      0   //  Yellow wire in GPIO Terminal Block
+#define downButton    1   //  Blue wire in the GPIO Terminal Block
+#define selectButton  2   //  White wire in the GPIO Terminal block
+#define opticalPin    3   //  Pin used to detect presence of cup in the platform other than weight
+#define shieldPin     4   //  Pin used to detect if the glass shield to protect the operator is open during dispensing.
+channelLabel valvePin = {1,3};
+channelLabel vacPumpSwitch = {1,4};
+channelLabel vacReleaseValve = {1,2};
+channelLabel greenLed = {1,1};
+channelLabel redLed = {1,6};
+channelLabel yellowLed = {1,5};
+channelLabel buzzer = {1,7};
+
+
+int menu =1;
+
+
+// HX711 circuit wiring
+const int LOADCELL_DOUT_PIN = A1;   //  Green Wire in the Terminal Block
+const int LOADCELL_SCK_PIN = A2;    //  Yellow wire in the Terminal Block
+const int m6c = 70;   //  This is the amount of adhessive material in grams set to be dispensed to the cup.  M6C and so on.
+const int spruce25 = 90;    // this is the amount of the adhessive 
+const int spruce50 = 140;
+const int spruce75 = 180;
+const int spruce100 = 220;
+int selectEnter;
+long zscale;
+long hundredscale;
+long fixzero;
+long fixhundred;
+float grams;
+int  upButtonStat;
+int  downButtonStat;
+int  opticalStat;
+int  shieldStat;
+const int sizeCup = 15;  // Size of the cup in the program is 15 grams.  This is used as minimum wieght in the platform before the dispenser can start dispensing.
+unsigned long pMillis = 0;
+unsigned long cMillis = 0;
+int inputCounts = 0;    // Vacuum process pressure sensor analoq pull out reading in Counts
+float inputVolts = 0;   // Convertion of the Reading / analog pull to Volts
+float pressureValue;
+int countCycle;
+long dwellTime = 110000;
+
+
+HX711 scale;
+
+void setup() {
+  Serial.begin(115200);
+  while (!P1.init()){ 
+    ; //Wait for Modules to Sign on   
+  }
+  analogWriteResolution(10);
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  lcd.setCursor(2,0);
+  lcd.print("Genesis Robotics");
+  lcd.setCursor(3,1);
+  lcd.print("Rotor Potting");
+  pinMode(upButton, INPUT_PULLUP);
+  pinMode(downButton,INPUT_PULLUP);
+  pinMode(selectButton, INPUT_PULLUP);
+  pinMode(opticalPin, INPUT);
+  pinMode(shieldPin, INPUT_PULLUP);
+  P1.writeDiscrete(LOW,valvePin);       //  This command is to initialize the relay open as the controller powers up.  Preventing the machine from accidentally releasing adhessive during startup.  Also this is a reminder that the SSR we used is a normally closed so we initialize it high during start.
+  delay(2000);
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Select rotor to Pot");
+  lcd.setCursor(0,1);
+  lcd.print("press Up/Down/Next");
+  lcd.setCursor(0,2);
+  lcd.print("  M6C");
+  lcd.setCursor(0,3);
+  lcd.print("  Spruce 25");
+  P1.writeDiscrete(HIGH, greenLed);
+}
+
+void selectSize(){
+  if (!digitalRead(downButton)){
+    menu++;
+    updateMenu();
+    delay(100);
+    while (!digitalRead(downButton));
+  }
+  if (!digitalRead(upButton)){
+    menu--;
+    updateMenu();
+    delay(100);
+    while(!digitalRead(upButton));
+  }
+  if (!digitalRead(selectButton)){
+    executeAction();
+    updateMenu();
+    delay(100);
+    while(!digitalRead(selectButton));
+  }
+}
+
+void updateMenu(){
+  switch(menu){
+    case 0:
+      menu = 1;
+      break;
+      
+    case 1:
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Select rotor to Pot");
+      lcd.setCursor(0,1);
+      lcd.print("press Up/Down/Next");
+      lcd.setCursor(0,2);
+      lcd.print("-->M6C");
+      lcd.setCursor(0,3);
+      lcd.print("   Spruce 25");
+      break;
+      
+    case 2:
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Select rotor to Pot");
+      lcd.setCursor(0,1);
+      lcd.print("press Up/Down/Next");
+      lcd.setCursor(0,2);
+      lcd.print("   M6C");
+      lcd.setCursor(0,3);
+      lcd.print("-->Spruce 25");
+      break;
+      
+    case 3:
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Select rotor to Pot");
+      lcd.setCursor(0,1);
+      lcd.print("press Up/Down/Next");
+      lcd.setCursor(0,2);
+      lcd.print("-->Spruce 50");
+      lcd.setCursor(0,3);
+      lcd.print("   Spruce 75");
+      break;
+      
+    case 4:
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Select rotor to Pot");
+      lcd.setCursor(0,1);
+      lcd.print("press Up/Down/Next");
+      lcd.setCursor(0,2);
+      lcd.print("   Spruce 50");
+      lcd.setCursor(0,3);
+      lcd.print("-->Spruce 75");
+      break;
+      
+    case 5:
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Select rotor to Pot");
+      lcd.setCursor(0,1);
+      lcd.print("Press Up/Down/Next");
+      lcd.setCursor(0,2);
+      lcd.print("-->Spruce100");
+      lcd.setCursor(0,3);
+      lcd.print("  Zeroing  ");
+      break;
+      
+    case 6:
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Select rotor to Pot");
+      lcd.setCursor(0,1);
+      lcd.print("Press Up/Down/Next");
+      lcd.setCursor(0,2);
+      lcd.print("   Spruce100");
+      lcd.setCursor(0,3);
+      lcd.print("-->Zeroing  ");
+      break;
+
+    case 7:
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Select rotor to Pot");
+      lcd.setCursor(0,1);
+      lcd.print("Press Up/Down/Next");
+      lcd.setCursor(0,2);
+      lcd.print("-->Manual Dispense");
+      lcd.setCursor(0,3);
+      lcd.print("   Vacuum Infuse");
+      break;
+      
+
+    case 8:
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Select rotor to Pot");
+      lcd.setCursor(0,1);
+      lcd.print("Press Up/Down/Next");
+      lcd.setCursor(0,2);
+      lcd.print("   Manual Dispense");
+      lcd.setCursor(0,3);
+      lcd.print("-->Vacuum Infuse");
+      break;
+
+      
+    case 9:
+      menu = 8;
+      break;
+  }
+}
+
+
+
+void executeAction(){
+  switch(menu){
+    case 1:
+      action1();
+      break;
+    case 2:
+      action2();
+      break;
+    case 3:
+      action3();
+      break;
+    case 4:
+      action4();
+      break;
+    case 5:
+      action5();
+      break;
+    case 6:
+      action6();
+      break;
+    case 7:
+      action7();
+      break;
+    case 8:
+      action8();
+      break;
+    case 9:
+      action8();
+      break;
+  }
+}
+
+
+void action1(){     //M6C Potting amount
+  lcd.init();
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print(">Potting M6C");
+  lcd.setCursor(0,1);
+  lcd.print("Put cup on platform");
+  lcd.setCursor(0,1);
+  delay(2000);
+  grams = 0;
+  selectEnter = 1;
+  opticalStat = 0;
+  while (selectEnter == 1) {
+    Serial.print("HX711 reading: ");
+    long reading = scale.read();
+    grams = map(reading,fixzero,fixhundred,0,100);
+    opticalStat = digitalRead(opticalPin);
+    shieldStat = digitalRead(shieldPin);
+    lcd.setCursor(0,0);
+    lcd.print("GENESIS ROBOTICS");
+    lcd.setCursor(0,1);
+    lcd.print("Weighing....");
+    lcd.setCursor(0,2);
+    lcd.print(grams);
+    lcd.setCursor(8,2);
+    lcd.print("grams");
+    Serial.println(grams,2); 
+    cMillis = millis();
+    if (grams > sizeCup && opticalStat == 1 && shieldStat == 0 && grams < m6c) {
+      lcd.setCursor(0,3);
+      lcd.print("adding adhessive ");
+      P1.writeDiscrete(LOW, greenLed);
+      P1.writeDiscrete(HIGH, yellowLed);
+      if (cMillis - pMillis < 5000){
+        P1.writeDiscrete(HIGH,valvePin);
+        Serial.println(cMillis);
+        }
+      else {
+        P1.writeDiscrete(LOW, valvePin);
+        delay(1000);
+        pMillis = cMillis;
+        Serial.println(cMillis);
+      } 
+    }
+    if (grams < sizeCup && opticalStat == 0){
+      lcd.setCursor(0,3);
+      lcd.print("Put cup to start");
+      P1.writeDiscrete(LOW,valvePin);
+    }
+    if (grams > m6c) {
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("STOPPED");
+      lcd.setCursor(0,1);
+      lcd.print("M6C adhessive");
+      lcd.setCursor(0,2);
+      lcd.print("quantity achieved");
+      P1.writeDiscrete(LOW, valvePin);
+      P1.writeDiscrete(HIGH, greenLed);
+      P1.writeDiscrete(LOW, yellowLed);
+      delay(1000);
+      selectEnter = 0;
+    }
+    Serial.print(selectEnter);
+    delay(50);
+    selectEnter = digitalRead(selectButton);
+  }
+  delay(1000);
+  P1.writeDiscrete(LOW, valvePin);
+}
+
+void action2(){   // Selection for Spruce 25 Stack
+  lcd.init();
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print(">Potting Spruce 25");
+  lcd.setCursor(0,1);
+  lcd.print("Put cup on platform");
+  lcd.setCursor(0,1);
+  delay(2000);
+  grams = 0;
+  selectEnter = 1;
+  opticalStat = 0;
+  while (selectEnter == 1) {
+    Serial.print("HX711 reading: ");
+    long reading = scale.read();
+    grams = map(reading,fixzero,fixhundred,0,100);
+    opticalStat = digitalRead(opticalPin);
+    shieldStat = digitalRead(shieldPin);
+    P1.writeDiscrete(LOW, greenLed);
+    P1.writeDiscrete(HIGH, yellowLed);
+    lcd.setCursor(0,0);
+    lcd.print("GENESIS ROBOTICS");
+    lcd.setCursor(0,1);
+    lcd.print("Weighing....");
+    lcd.setCursor(0,2);
+    lcd.print(grams);
+    lcd.setCursor(8,2);
+    lcd.print("grams");
+    Serial.println(grams,2); 
+    cMillis = millis();
+    if (grams > sizeCup && opticalStat == 1 && shieldStat == 0 && grams < spruce25) {  // checks for weight and pump adhessive if it is less than m6c required adhessive volume and there is cup in it.
+      lcd.setCursor(0,3);
+      lcd.print("adding adhessive ");
+      if (cMillis - pMillis < 5000){
+        P1.writeDiscrete(HIGH,valvePin);
+        Serial.println(cMillis);
+        }
+      else {
+        P1.writeDiscrete(LOW, valvePin);
+        delay(1000);
+        pMillis = cMillis;
+        Serial.println(cMillis);
+      } 
+    }
+    if (grams < sizeCup && opticalStat == 0){
+      lcd.setCursor(0,3);
+      lcd.print("Put cup to start");
+      P1.writeDiscrete(LOW,valvePin);
+    }
+    if (grams > spruce25) {
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("STOPPED");
+      lcd.setCursor(0,1);
+      lcd.print("1830 adhessive");
+      lcd.setCursor(0,2);
+      lcd.print("quantity achieved");
+      P1.writeDiscrete(LOW, valvePin);
+      P1.writeDiscrete(HIGH, greenLed);
+      P1.writeDiscrete(LOW, yellowLed);
+      delay(1000);
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Exiting");
+      lcd.setCursor(0,1);
+      lcd.print("to main menu");
+      lcd.setCursor(0,2);
+      lcd.print("for next precess");
+      selectEnter = 0;
+      }
+    Serial.print(selectEnter);
+    delay(50);
+    selectEnter = digitalRead(selectButton);
+  }
+  delay(1000);
+  P1.writeDiscrete(LOW, valvePin);
+}
+
+void action3(){   //Selection for Spruce 50 Stack
+  lcd.init();
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print(">Potting Spruce 50");
+  lcd.setCursor(0,1);
+  lcd.print("Put cup on platform");
+  lcd.setCursor(0,1);
+  delay(2000);
+  grams = 0;
+  selectEnter = 1;
+  opticalStat = 0;
+  while (selectEnter == 1) {
+    Serial.print("HX711 reading: ");
+    long reading = scale.read();
+    grams = map(reading,fixzero,fixhundred,0,100);
+    opticalStat = digitalRead(opticalPin);
+    shieldStat = digitalRead(shieldPin);
+    lcd.setCursor(0,0);
+    lcd.print("GENESIS ROBOTICS");
+    lcd.setCursor(0,1);
+    lcd.print("Weighing....");
+    lcd.setCursor(0,2);
+    lcd.print(grams);
+    lcd.setCursor(8,2);
+    lcd.print("grams");
+    Serial.println(grams,2); 
+    cMillis = millis();
+    if (grams > sizeCup && opticalStat == 1 && shieldStat == 0 && grams < spruce50) {  // checks for weight and pump adhessive if it is less than m6c required adhessive volume and there is cup in it.
+      lcd.setCursor(0,3);
+      lcd.print("adding adhessive ");
+      if (cMillis - pMillis < 5000){
+        P1.writeDiscrete(HIGH,valvePin);
+        P1.writeDiscrete(LOW, greenLed);
+        P1.writeDiscrete(HIGH, yellowLed);
+        Serial.println(cMillis);
+        }
+      else {
+        P1.writeDiscrete(LOW, valvePin);
+        delay(1000);
+        pMillis = cMillis;
+        Serial.println(cMillis);
+      } 
+    }
+    if (grams < sizeCup && opticalStat == 0){
+      lcd.setCursor(0,3);
+      lcd.print("Put cup to start");
+      P1.writeDiscrete(LOW,valvePin);
+    }
+    if (grams > spruce50) {
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("STOPPED");
+      lcd.setCursor(0,1);
+      lcd.print("1841 adhessive");
+      lcd.setCursor(0,2);
+      lcd.print("quantity achieved");
+      P1.writeDiscrete(LOW, valvePin);
+      P1.writeDiscrete(HIGH, greenLed);
+      P1.writeDiscrete(LOW, yellowLed);
+      delay(1000);
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Exiting");
+      lcd.setCursor(0,1);
+      lcd.print("to main menu");
+      lcd.setCursor(0,2);
+      lcd.print("for next precess");
+      selectEnter = 0;
+      }
+    Serial.print(selectEnter);
+    delay(50);
+    selectEnter = digitalRead(selectButton);
+  }
+  delay(1000);
+  P1.writeDiscrete(LOW, valvePin);
+}
+
+void action4(){   //Selection for Spruce 75 stack
+  lcd.init();
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print(">Potting Spruce 75");
+  lcd.setCursor(0,1);
+  lcd.print("Put cup on platform");
+  lcd.setCursor(0,1);
+  delay(2000);
+  grams = 0;
+  selectEnter = 1;
+  opticalStat = 0;
+  while (selectEnter == 1) {
+    Serial.print("HX711 reading: ");
+    long reading = scale.read();
+    grams = map(reading,fixzero,fixhundred,0,100);
+    opticalStat = digitalRead(opticalPin);
+    shieldStat = digitalRead(shieldPin);
+    lcd.setCursor(0,0);
+    lcd.print("GENESIS ROBOTICS");
+    lcd.setCursor(0,1);
+    lcd.print("Weighing....");
+    lcd.setCursor(0,2);
+    lcd.print(grams);
+    lcd.setCursor(8,2);
+    lcd.print("grams");
+    Serial.println(grams,2); 
+    cMillis = millis();
+    if (grams > sizeCup && opticalStat == 1 && shieldStat == 0 && grams < spruce75) {  // checks for weight and pump adhessive if it is less than m6c required adhessive volume and there is cup in it.
+      lcd.setCursor(0,3);
+      lcd.print("adding adhessive ");
+      if (cMillis - pMillis < 5000){
+        P1.writeDiscrete(HIGH,valvePin);
+        P1.writeDiscrete(LOW, greenLed);
+        P1.writeDiscrete(HIGH, yellowLed);
+        Serial.println(cMillis);
+        }
+      else {
+        P1.writeDiscrete(LOW, valvePin);
+        delay(1000);
+        pMillis = cMillis;
+        Serial.println(cMillis);
+      } 
+    }
+    if (grams < sizeCup && opticalStat == 0){
+      lcd.setCursor(0,3);
+      lcd.print("Put cup to start");
+      P1.writeDiscrete(LOW,valvePin);
+    }
+    if (grams > spruce75) {
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("STOPPED");
+      lcd.setCursor(0,1);
+      lcd.print("1850 adhessive");
+      lcd.setCursor(0,2);
+      lcd.print("quantity achieved");
+      P1.writeDiscrete(LOW, valvePin);
+      P1.writeDiscrete(HIGH, greenLed);
+      P1.writeDiscrete(LOW, yellowLed);
+      delay(1000);
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Exiting");
+      lcd.setCursor(0,1);
+      lcd.print("to main menu");
+      lcd.setCursor(0,2);
+      lcd.print("for next precess");
+      selectEnter = 0;
+      }
+    Serial.print(selectEnter);
+    delay(50);
+    selectEnter = digitalRead(selectButton);
+  }
+  delay(1000);
+  P1.writeDiscrete(LOW, valvePin);
+}
+
+void action5(){   //Selection for Spruce 100 stack
+  lcd.init();
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print(">Potting Spruce 100");
+  lcd.setCursor(0,1);
+  lcd.print("Put cup on platform");
+  lcd.setCursor(0,1);
+  delay(2000);
+  grams = 0;
+  selectEnter = 1;
+  opticalStat = 0;
+  while (selectEnter == 1) {
+    Serial.print("HX711 reading: ");
+    long reading = scale.read();
+    grams = map(reading,fixzero,fixhundred,0,100);
+    opticalStat = digitalRead(opticalPin);
+    shieldStat = digitalRead(shieldPin);
+    lcd.setCursor(0,0);
+    lcd.print("GENESIS ROBOTICS");
+    lcd.setCursor(0,1);
+    lcd.print("Weighing....");
+    lcd.setCursor(0,2);
+    lcd.print(grams);
+    lcd.setCursor(8,2);
+    lcd.print("grams");
+    Serial.println(grams,2); 
+    cMillis = millis();
+    if (grams > sizeCup && opticalStat == 1 && shieldStat == 0 && grams < spruce100) {  // checks for weight and pump adhessive if it is less than m6c required adhessive volume and there is cup in it.
+      lcd.setCursor(0,3);
+      lcd.print("adding adhessive ");
+      if (cMillis - pMillis < 5000){
+        P1.writeDiscrete(HIGH,valvePin);
+        P1.writeDiscrete(LOW, greenLed);
+        P1.writeDiscrete(HIGH, yellowLed);
+        Serial.println(cMillis);
+        }
+      else {
+        P1.writeDiscrete(LOW, valvePin);
+        delay(1000);
+        pMillis = cMillis;
+        Serial.println(cMillis);
+      } 
+    }
+    if (grams < sizeCup && opticalStat == 0){
+      lcd.setCursor(0,3);
+      lcd.print("Put cup to start");
+      P1.writeDiscrete(LOW,valvePin);
+    }
+    if (grams > spruce100) {
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("STOPPED");
+      lcd.setCursor(0,1);
+      lcd.print("1860 adhessive");
+      lcd.setCursor(0,2);
+      lcd.print("quantity achieved");
+      P1.writeDiscrete(LOW, valvePin);
+      P1.writeDiscrete(HIGH, greenLed);
+      P1.writeDiscrete(LOW, yellowLed);
+      delay(1000);
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Exiting");
+      lcd.setCursor(0,1);
+      lcd.print("to main menu");
+      lcd.setCursor(0,2);
+      lcd.print("for next precess");
+      selectEnter = 0;
+      }
+    Serial.print(selectEnter);
+    delay(50);
+    selectEnter = digitalRead(selectButton);
+  }
+  delay(1000);
+  P1.writeDiscrete(LOW, valvePin);
+}
+
+
+void action6(){   // Selection to zero every machine startup.
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print(">>> Zeroing... ");
+  lcd.setCursor(0,1);
+  lcd.print("Please clear scale");
+  delay(3000);
+  lcd.clear();
+  selectEnter = 1;
+  opticalStat = 0;
+  while (selectEnter == 1){
+    long zscale = scale.read();
+    lcd.setCursor(0,0);
+    lcd.print("Raw scale 0 value");
+    lcd.setCursor(0,1);
+    lcd.print(zscale);
+    lcd.setCursor(0,3);
+    lcd.print("Enter to continue");
+    selectEnter = digitalRead(selectButton);
+    fixzero = zscale;
+    delay(50);
+  }
+  delay(200);
+  selectEnter = 1;
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print(">>> Mapping 100grms ");
+  lcd.setCursor(0,1);
+  lcd.print("Put 100g on scale");
+  delay(3000);
+  selectEnter = 1;
+  lcd.clear();
+  while (selectEnter == 1){
+    hundredscale = scale.read();
+    lcd.setCursor(0,0);
+    lcd.print("Raw scale 100 grms");
+    lcd.setCursor(0,1);
+    lcd.print(hundredscale);
+    lcd.setCursor(0,3);
+    lcd.print("Enter to continue");
+    selectEnter = digitalRead(selectButton);
+    fixhundred = hundredscale;
+    delay(150);
+  } 
+  selectEnter = 1;
+  delay(200);
+  selectEnter = 1;
+  lcd.clear(); 
+  while (selectEnter == 1) {
+    Serial.print("HX711 reading: ");
+    long reading = scale.read();
+    grams = map(reading, fixzero, fixhundred, 0, 100);
+    lcd.setCursor(0,0);
+    lcd.print("GENESIS ROBOTICS");
+    lcd.setCursor(0,1);
+    lcd.print("Weighing....");
+    lcd.setCursor(0,2);
+    lcd.print(grams);
+    lcd.setCursor(8,2);
+    lcd.print("grams");
+    Serial.println(grams);
+    lcd.setCursor(0,3);
+    lcd.print(reading);
+    selectEnter = digitalRead(selectButton);
+    delay(50);
+  }
+}
+
+
+
+void action7(){   // Selection to manually dispense
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Scale/Manual Dispense");
+  lcd.setCursor(0,1);
+  lcd.print("Up->Semi  Next->Exit");
+  lcd.setCursor(0,2);
+  lcd.print("Down->Full");
+  lcd.setCursor(0,3);
+  lcd.print("Weight = ");
+  selectEnter = 1;
+  opticalStat = 0;
+  upButtonStat = 1;
+  downButtonStat = 1;
+  delay(1000);
+  selectEnter = 1;
+  grams = 0;
+  while (selectEnter == 1){
+    long reading = scale.read();
+    grams = map(reading,fixzero,fixhundred,0,100);
+    opticalStat = digitalRead(opticalPin);
+    shieldStat = digitalRead(shieldPin);
+    lcd.setCursor(11,3);
+    lcd.print(grams);
+    if (grams > sizeCup && opticalStat == 1 && shieldStat == 0){
+      if (upButtonStat == 0){
+        P1.writeDiscrete(HIGH,valvePin);
+        delay(1000);
+        P1.writeDiscrete(LOW,valvePin);
+      }
+      if (downButtonStat == 0){
+        P1.writeDiscrete(HIGH,valvePin);
+        delay(200);
+      }
+      else{
+        P1.writeDiscrete(LOW,valvePin);
+      }
+    } 
+    selectEnter = digitalRead(selectButton);
+    upButtonStat = digitalRead(upButton); 
+    downButtonStat = digitalRead(downButton); 
+    // P1.writeDiscrete(LOW,valvePin);
+    lcd.setCursor(19,3);
+    lcd.print("*");
+    delay(50);
+  }
+  P1.writeDiscrete(LOW,valvePin);
+  delay(150);
+}
+
+
+void action8(){   // Selection to Automate vacuum infusion of the adhessive to the rotor
+  selectEnter = 1;
+  delay(1000);
+  selectEnter = 1;  // doubling to ensure debounce is caught 
+  lcd.clear();
+  while (selectEnter == 1){
+    lcd.setCursor(0,0);
+    lcd.print("VACUUM OPERATION");
+    lcd.setCursor(0,1);
+    lcd.print("Ensure that resin");
+    lcd.setCursor(0,2);
+    lcd.print("& hardener is mixed");
+    lcd.setCursor(0,3);
+    lcd.print("Continue press next");
+    selectEnter = digitalRead(selectButton);
+    delay(200);
+  }
+  selectEnter = 1;
+  lcd.clear();
+  while (selectEnter == 1){
+    lcd.setCursor(0,0);
+    lcd.print("VACUUM OPERATION");
+    lcd.setCursor(0,1);
+    lcd.print("Pour the mix and");
+    lcd.setCursor(0,2);
+    lcd.print("put on the cover");
+    lcd.setCursor(0,3);
+    lcd.print("Continue press next");
+    selectEnter = digitalRead(selectButton);
+    delay(100);
+  }
+  delay(1000);
+  lcd.clear();
+  lcd.setCursor(0,0);
+  P1.writeDiscrete(LOW, greenLed);
+  P1.writeDiscrete(HIGH, yellowLed);
+  lcd.print("VACUUM OPERATION)");
+  countCycle = 1;
+  selectEnter = 1;
+  upButtonStat = 1;
+  cMillis = millis();
+  pMillis = millis();     //  Ensures that the initial time of both pMillis and cMillis are the latest millis upon entering this function.
+  while (countCycle < 4) {
+    P1.writeDiscrete(LOW,vacReleaseValve);
+    inputCounts = P1.readAnalog(2, 2); //Reads analog data from slot 2 channel 2 of the analog input module
+    inputVolts = 100 * ((float)inputCounts / 8191);  //Convert 13-bit value to Volts
+    // Serial.println("Channel 1 is reading: ");
+    // Serial.print(inputVolts,4); //Print the value in Volts up to 2 decimal places
+    // Serial.println("V");
+    pressureValue = map(inputVolts,46.330, 28.5, 0, 20);
+    // Serial.print(pressureValue, 4);
+    // Serial.println(" in HG");
+    lcd.setCursor(0,1);
+    lcd.print("Vacuum reading:");
+    lcd.setCursor(0,2);
+    lcd.print(pressureValue);
+    lcd.setCursor(0,3);
+    lcd.print("Cycle:");
+    lcd.setCursor(10,3);
+    lcd.print(countCycle);
+    if (cMillis - pMillis < dwellTime) {
+      if (pressureValue < 18.5){
+        P1.writeDiscrete(HIGH,vacPumpSwitch);
+      }
+      if (pressureValue > 22){
+        P1.writeDiscrete(LOW,vacPumpSwitch);
+      }
+      if (pressureValue > 19){
+        cMillis = millis();
+      }
+      Serial.println(cMillis);
+      Serial.println(pMillis);
+    }
+    else {
+      P1.writeDiscrete(HIGH,vacPumpSwitch);
+      // pMillis = cMillis;
+      while (pressureValue > 1){
+        P1.writeDiscrete(LOW,vacPumpSwitch);
+        P1.writeDiscrete(HIGH,vacReleaseValve);
+        inputCounts = P1.readAnalog(2, 2); //Reads analog data from slot 2 channel 2 of the analog input module
+        inputVolts = 100 * ((float)inputCounts / 8191);  //Convert 13-bit value to Volts
+        Serial.println("Channel 1 is reading: ");
+        Serial.print(inputVolts,4); //Print the value in Volts up to 2 decimal places
+        Serial.println("V");
+        pressureValue = map(inputVolts,46.330, 28.5, 0, 20);
+        Serial.print(pressureValue, 4);
+        lcd.setCursor(0,2);
+        lcd.print(pressureValue);
+        lcd.setCursor(0,3);
+        lcd.print("Cycle:");
+        lcd.setCursor(10,3);
+        lcd.print(countCycle);
+        cMillis = millis();
+      }
+      pMillis = cMillis;
+      Serial.println(cMillis); 
+      countCycle++; 
+    }
+  upButtonStat = digitalRead(upButton); 
+  if (upButtonStat == 0){
+      countCycle = 5;     //  This allows the operator to abort the vacuum operation when pressing up button during the process
+    }
+  delay(50);  
+  }
+  lcd.clear();
+  P1.writeDiscrete(LOW,vacPumpSwitch);
+  P1.writeDiscrete(HIGH,vacReleaseValve);
+  if (upButtonStat == 0) {
+    lcd.setCursor(0,0);
+    lcd.print("Vacuum process");
+    lcd.setCursor(0,1);
+    lcd.print("aborted!!!");
+  }
+  else {
+    lcd.setCursor(0,0);
+    lcd.print("Vacuum process");
+    lcd.setCursor(0,1);
+    lcd.print("Complete");
+  }
+  delay(12000);         // This delay is to allow the vacuum chamber to allow air to come in before resting to menu
+  P1.writeDiscrete(LOW,vacReleaseValve);
+  lcd.clear();
+  while (selectEnter == 1){
+    P1.writeDiscrete(LOW, yellowLed);
+    P1.writeDiscrete(HIGH, redLed);
+    P1.writeDiscrete(HIGH, buzzer);
+    lcd.setCursor(0,0);
+    lcd.print("VACUUM OPERATION");
+    lcd.setCursor(0,1);
+    lcd.print("           ");
+    lcd.setCursor(0,2);
+    lcd.print("Press next to exit");
+    lcd.setCursor(0,3);
+    lcd.print("to the main menu.");
+    selectEnter = digitalRead(selectButton);
+    delay(100);
+    P1.writeDiscrete(LOW, buzzer);
+    P1.writeDiscrete(LOW, redLed);
+    delay(100);
+  }
+  P1.writeDiscrete(HIGH, greenLed);
+  P1.writeDiscrete(LOW, buzzer);
+}
+
+
+
+void loop() {
+  selectSize();
+}
